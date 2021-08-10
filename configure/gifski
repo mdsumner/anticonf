@@ -1,0 +1,25 @@
+# mimics: source ~/.cargo/env
+export PATH="$HOME/.cargo/bin:$PATH"
+
+# Write 'cargo' to Makevars
+cargo --version
+if [ $? -eq 0 ]; then
+  echo "Using `which cargo`"
+  exit 0
+fi
+
+# Try local version on MacOS, otherwise error
+[ `uname` = "Darwin" ] && curl "https://autobrew.github.io/scripts/rust" -sSf | sh && exit 0
+echo "------------------ RUST COMPILER NOT FOUND --------------------"
+echo ""
+echo "Cargo was not found on the PATH. Please install cargo / rustc:"
+echo ""
+echo " - yum install cargo         (Fedora/CentOS)"
+echo " - apt-get install cargo     (Debian/Ubuntu)"
+echo " - brew install rust         (MacOS)"
+echo ""
+echo "Alternatively install Rust from: <https://www.rust-lang.org>"
+echo ""
+echo "---------------------------------------------------------------"
+echo ""
+exit 1

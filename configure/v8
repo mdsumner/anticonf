@@ -1,0 +1,114 @@
+# Anticonf (tm) script by Jeroen Ooms (2020)
+# Package requires either libv8 6 and up, or legacy branch (3.14 / 3.15).
+# If your libv8 is installed in a custom location you need to set
+# INCLUDE_DIR and LIB_DIR manually via e.g:
+# R CMD INSTALL --configure-vars='INCLUDE_DIR=/.../include LIB_DIR=/.../lib'
+PKG_DEB_NAME="libv8-dev or libnode-dev"
+PKG_RPM_NAME="v8-devel"
+PKG_CSW_NAME="libv8_dev"
+PKG_BREW_NAME="v8"
+PKG_TEST_HEADER="<v8.h>"
+PKG_LIBS="-lv8 -lv8_libplatform"
+PKG_CFLAGS="-I/usr/include/v8 -I/usr/include/v8-3.14"
+
+UNAME=`uname`
+UARCH=`uname -m`
+
+# On CI or legacy Ubuntu: use static V8 by default
+if [ "$GITHUB_ACTIONS" ] || [ "$TRAVIS" ] || [ -f "/usr/lib/libv8.so.3.14.5" ]; then
+if [ -z "$DISABLE_STATIC_LIBV8" ] && [ "$UARCH" = "x86_64" ]; then
+DOWNLOAD_STATIC_LIBV8=1
+fi
+fi
+
+# Use CXX14 when available, required as of libv8 version 8.7.80
+CXX14=`${R_HOME}/bin/R CMD config CXX14`
+
+# Upon failure, some versions of R return error, others succes with empty output
+if [ $? -ne 0 ] || [ -z "$CXX14" ]; then
+echo "Not using CXX14"
+CXX_STD=CXX11
+CXX=`${R_HOME}/bin/R CMD config CXX`
+CXXFLAGS=`${R_HOME}/bin/R CMD config CXXFLAGS`
+else
+echo "Found C++14 compiler: $CXX14"
+CXX_STD=CXX14
+CXX="$CXX14 `${R_HOME}/bin/R CMD config CXX14STD`"
+CXXFLAGS=`${R_HOME}/bin/R CMD config CXX14FLAGS`
+fi
+
+# Find compiler
+CPPFLAGS=`${R_HOME}/bin/R CMD config CPPFLAGS`
+LDFLAGS=`${R_HOME}/bin/R CMD config LDFLAGS`
+CXXCPP="$CXX -E"
+
+# Check for custom locations
+if [ "$INCLUDE_DIR" ] || [ "$LIB_DIR" ]; then
+  echo "Found INCLUDE_DIR and/or LIB_DIR!"
+  PKG_CFLAGS="-I$INCLUDE_DIR $PKG_CFLAGS"
+  PKG_LIBS="-L$LIB_DIR $PKG_LIBS"
+elif [ "$UNAME" = "Darwin" ]; then
+  if [ `command -v brew` ] && [ -z "$DOWNLOAD_STATIC_LIBV8" ]; then
+    BREWDIR=`brew --prefix`
+    V8HOME="$BREWDIR/opt/$PKG_BREW_NAME"
+    PKG_CFLAGS="-I${V8HOME}/include -I${V8HOME}/libexec/include"
+    PKG_LIBS="-L${V8HOME}/libexec $PKG_LIBS"
+  else
+    curl -sfL "https://autobrew.github.io/scripts/$PKG_BREW_NAME" > autobrew
+    . ./autobrew
+  fi
+elif [ "$DOWNLOAD_STATIC_LIBV8" ]; then
+  ${R_HOME}/bin/R -q -e 'curl::curl_download("http://jeroen.github.io/V8/get-v8-linux.sh","get-v8-linux.sh")'
+  . ./get-v8-linux.sh
+fi
+
+# For debugging
+echo "Using CXXCPP=$CXXCPP"
+echo "Using PKG_CFLAGS=$PKG_CFLAGS"
+echo "Using PKG_LIBS=$PKG_LIBS"
+
+# Test for libv8
+echo "#include $PKG_TEST_HEADER" | ${CXXCPP} ${CPPFLAGS} ${PKG_CFLAGS} ${CXXFLAGS} -xc++ - >/dev/null 2>configure.log
+if [ $? -ne 0 ]; then
+  echo "-----------------------------[ ANTICONF ]-------------------------------"
+  echo "Configuration failed to find the libv8 engine library. Try installing:"
+  echo " * deb: $PKG_DEB_NAME (Debian / Ubuntu)"
+  echo " * rpm: $PKG_RPM_NAME (Fedora, EPEL)"
+  echo " * brew: $PKG_BREW_NAME (OSX)"
+  echo " * csw: $PKG_CSW_NAME (Solaris)"
+  echo "Alternatively, on Linux (x86_64) or MacOS you can set environment variable:"
+  echo "    DOWNLOAD_STATIC_LIBV8=1"
+  echo "to automatically download a static version of libv8."
+  echo "To use a custom libv8, set INCLUDE_DIR and LIB_DIR manually via:"
+  echo "R CMD INSTALL --configure-vars='INCLUDE_DIR=... LIB_DIR=...'"
+  echo "---------------------------[ ERROR MESSAGE ]----------------------------"
+  cat configure.log
+  echo "------------------------------------------------------------------------"
+  exit 1
+fi
+
+# Test for legacy libv8 version
+${CXXCPP} ${CPPFLAGS} ${PKG_CFLAGS} ${CXXFLAGS} src/legacy/test.cpp >/dev/null 2>&1
+if [ $? -eq 0 ]; then
+  echo "Found legacy version of libv8"
+  PKG_LIBS=`echo "$PKG_LIBS" | sed -e "s/-lv8_libplatform//"`
+  sed -e "s|@cflags@|$PKG_CFLAGS|" -e "s|@libs@|$PKG_LIBS|" src/legacy/Makevars.in > src/Makevars
+  exit 0
+fi
+
+# Test if we need to enable pointer compression (Usually 8.4 and up)
+echo "Running feature test for pointer compression..."
+${CXX} ${CPPFLAGS} ${PKG_CFLAGS} ${CXXFLAGS} -DV8_ENABLE_CHECKS tools/test.cpp -o pctest ${LDFLAGS} ${PKG_LIBS} -pthread
+{ ./pctest; } 2>> configure.log
+if [ $? -eq 0 ]; then
+  echo "Pointer compression not needed"
+  PKG_CFLAGS="$PKG_CFLAGS -DV8_ENABLE_CHECKS"
+else
+  echo "Enabling pointer compression"
+  PKG_CFLAGS="$PKG_CFLAGS -DV8_COMPRESS_POINTERS"
+fi
+rm -Rf pctest*
+
+# Assume a modern V8 API
+sed -e "s|@cflags@|$PKG_CFLAGS|" -e "s|@libs@|$PKG_LIBS|" -e "s|CXX11|${CXX_STD}|" src/Makevars.in > src/Makevars
+exit 0

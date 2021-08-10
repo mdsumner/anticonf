@@ -1,0 +1,116 @@
+#!/bin/sh
+# Anticonf (tm) script by Jeroen Ooms (2020)
+# This script will query 'pkg-config' for the required cflags and ldflags.
+# On MacOS and Linux, if libgit2 is not found or too old, we try to downoad
+# a portable static build and use that instead.
+
+# Library settings
+PKG_CONFIG_NAME="libgit2"
+PKG_DEB_NAME="libgit2-dev"
+PKG_RPM_NAME="libgit2-devel"
+PKG_BREW_NAME="libgit2"
+PKG_TEST_HEADER="<git2.h>"
+PKG_TEST_FILE="tools/version.c"
+PKG_LIBS="-lgit2"
+PKG_CFLAGS=""
+
+# Use pkg-config if available
+pkg-config ${PKG_CONFIG_NAME} --atleast-version=0.19 2>/dev/null
+if [ $? -eq 0 ]; then
+  PKGCONFIG_CFLAGS=`pkg-config --cflags --silence-errors ${PKG_CONFIG_NAME}`
+  PKGCONFIG_LIBS=`pkg-config --libs ${PKG_CONFIG_NAME}`
+  pkg-config ${PKG_CONFIG_NAME} --atleast-version=0.28 && USE_SYSTEM_LIBGIT2=1
+fi
+
+# On Linux distros with old libgit2, try downloading our static build.
+if [ -z "$USE_SYSTEM_LIBGIT2" ] && [ `uname` = "Linux" ] && [ `arch` = "x86_64" ]; then
+  ${R_HOME}/bin/R -q -e 'curl::curl_download("https://r-lib.github.io/gert/get-libgit2-linux.sh","get-libgit2-linux.sh")' || true
+  if [ -f "get-libgit2-linux.sh" ]; then
+  . ./get-libgit2-linux.sh
+  fi
+fi
+
+# Check for custom locations
+if [ "$INCLUDE_DIR" ] || [ "$LIB_DIR" ]; then
+  echo "Found INCLUDE_DIR and/or LIB_DIR!"
+  PKG_CFLAGS="-I$INCLUDE_DIR $PKG_CFLAGS"
+  PKG_LIBS="-L$LIB_DIR $PKG_LIBS"
+elif [ "$HAVE_STATIC_LIBGIT2" ]; then
+  echo "Using static libgit2-1.1.0 for Linux x86_64"
+elif [ "$PKGCONFIG_CFLAGS" ] || [ "$PKGCONFIG_LIBS" ]; then
+  echo "Found pkg-config cflags and libs!"
+  PKG_CFLAGS=${PKGCONFIG_CFLAGS}
+  PKG_LIBS=${PKGCONFIG_LIBS}
+elif [ `uname` = "Darwin" ]; then
+  brew --version 2>/dev/null
+  if [ $? -eq 0 ]; then
+    BREWDIR=`brew --prefix`
+    PKG_CFLAGS="-I$BREWDIR/opt/$PKG_BREW_NAME/include"
+    PKG_LIBS="-L$BREWDIR/opt/$PKG_BREW_NAME/lib $PKG_LIBS"
+  else
+    curl -sfL "https://autobrew.github.io/scripts/$PKG_BREW_NAME" > autobrew
+    . autobrew
+  fi
+fi
+
+# Find compiler
+CC=`${R_HOME}/bin/R CMD config CC`
+CFLAGS=`${R_HOME}/bin/R CMD config CFLAGS`
+CPPFLAGS=`${R_HOME}/bin/R CMD config CPPFLAGS`
+
+# For debugging
+echo "Using PKG_CFLAGS=$PKG_CFLAGS"
+echo "Using PKG_LIBS=$PKG_LIBS"
+
+# Test configuration
+echo "#include $PKG_TEST_HEADER" | ${CC} ${CPPFLAGS} ${PKG_CFLAGS} ${CFLAGS} -E -xc - >/dev/null 2>configure.log
+
+# Customize the error
+if [ $? -ne 0 ]; then
+  echo "----------------------------- ANTICONF -------------------------------"
+  echo "Configuration failed to find $PKG_CONFIG_NAME library. Try installing:"
+  echo " * brew: $PKG_BREW_NAME (MacOS)"
+  echo " * deb: $PKG_DEB_NAME (Debian, Ubuntu, etc)"
+  echo " * rpm: $PKG_RPM_NAME (Fedora, CentOS, RHEL)"
+  echo "If $PKG_CONFIG_NAME is already installed, check that 'pkg-config' is in your"
+  echo "PATH and PKG_CONFIG_PATH contains a $PKG_CONFIG_NAME.pc file. If pkg-config"
+  echo "is unavailable you can set INCLUDE_DIR and LIB_DIR manually via:"
+  echo "R CMD INSTALL --configure-vars='INCLUDE_DIR=... LIB_DIR=...'"
+  echo "-------------------------- [ERROR MESSAGE] ---------------------------"
+  cat configure.log
+  echo "----------------------------------------------------------------------"
+  exit 1
+fi
+
+# Write to Makevars
+sed -e "s|@cflags@|$PKG_CFLAGS|" -e "s|@libs@|$PKG_LIBS|" src/Makevars.in > src/Makevars
+
+# Allow for skipping test
+if [ "$SKIP_LIBGIT2_VERSION_TEST" ]; then
+  exit 0
+fi
+
+# Test version of libgit2
+${CC} ${CPPFLAGS} ${PKG_CFLAGS} ${CFLAGS} -E ${PKG_TEST_FILE} >/dev/null 2>&1
+
+# On Ubuntu we enforce using the PPA
+if [ $? -ne 0 ]; then
+  lsb_release -c 2>/dev/null | grep -E 'trusty|xenial' 2>/dev/null
+  if [ $? -eq 0 ]; then
+    echo "------------------------- ANTICONF ERROR ---------------------------"
+    echo "Configuration failed because $PKG_CONFIG_NAME is too old."
+    echo "Please install it from the following PPA for Ubuntu Trusty or Xenial:"
+    echo ""
+    echo "  sudo add-apt-repository ppa:cran/libgit2"
+    echo "  sudo apt-get update"
+    echo "  sudo apt-get install libssh2-1-dev libgit2-dev"
+    echo "--------------------------------------------------------------------"
+    exit 1
+  else
+    echo "WARNING: your version of libgit2 is really old! HTTPS / SSH might not work"
+  fi
+fi
+
+# Success
+echo "Configuration OK!"
+exit 0

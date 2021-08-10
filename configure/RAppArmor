@@ -1,0 +1,60 @@
+#!/bin/sh
+# To build on Linux Systems without AppArmor use:
+# NO_APPARMOR=1
+
+# Library settings
+PKG_CONFIG_NAME="libapparmor"
+PKG_DEB_NAME="libapparmor-dev"
+PKG_TEST_HEADER="<sys/apparmor.h>"
+PKG_LIBS="-lapparmor"
+
+# Linux Kernel without AppArmor (or not Linux)
+if [ ! -e "/sys/module/apparmor" ]; then
+  NO_APPARMOR=1
+fi
+
+#Configuration without AppArmor support
+if [ ! -z "$NO_APPARMOR" ]; then
+  sed -e "s|@cflags@|-DNO_APPARMOR|" -e "s|@libs@||" src/Makevars.in > src/Makevars
+  exit 0
+fi
+
+#Try pkg-config
+pkg-config --exists libapparmor 2> /dev/null
+if [ $? -eq 0 ]; then
+  echo "Found pkg-config cflags/libs!"
+  PKG_CFLAGS=$(pkg-config --cflags libapparmor)
+  PKG_LIBS=$(pkg-config --libs libapparmor)
+fi
+
+# For debugging
+echo "Using PKG_CFLAGS=$PKG_CFLAGS"
+echo "Using PKG_LIBS=$PKG_LIBS"
+
+# Find compiler
+CC=$(${R_HOME}/bin/R CMD config CC)
+CFLAGS=$(${R_HOME}/bin/R CMD config CFLAGS)
+CPPFLAGS=$(${R_HOME}/bin/R CMD config CPPFLAGS)
+
+# Test for header
+echo "#include $PKG_TEST_HEADER" | ${CC} -E ${CPPFLAGS} ${PKG_CFLAGS} ${CFLAGS} -xc - >/dev/null 2>&1
+
+# Customize the error
+if [ $? -ne 0 ]; then
+  echo "Could not find AppArmor headers. Please install $PKG_DEB_NAME."
+  echo "To build on Linux Systems without AppArmor use:"
+  echo "install.packages('RAppArmor', configure.vars = 'NO_APPARMOR=1')"
+  exit 1
+fi
+
+# Check unix package
+${R_HOME}/bin/Rscript -e 'stopifnot(unix::aa_config()$compiled)'
+if [ $? -ne 0 ]; then
+ echo "The unix package was built without apparmor. Please reinstall:"
+ echo "install.packages('unix')"
+ exit 1
+fi
+
+# Write to Makevars
+sed -e "s|@cflags@|$PKG_CFLAGS|" -e "s|@libs@|$PKG_LIBS|" src/Makevars.in > src/Makevars
+exit 0

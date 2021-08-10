@@ -1,0 +1,93 @@
+# Anticonf (tm) script by Jeroen Ooms (2020)
+# This script will query 'pkg-config' for the required cflags and ldflags.
+# If pkg-config is unavailable or does not find the library, try setting
+# INCLUDE_DIR and LIB_DIR manually via e.g:
+# R CMD INSTALL --configure-vars='INCLUDE_DIR=/.../include LIB_DIR=/.../lib'
+
+# Library settings
+PKG_CONFIG_NAME="libavfilter"
+PKG_DEB_NAME="libavfilter-dev"
+PKG_RPM_NAME="ffmpeg-devel (https://rpmfusion.org)"
+PKG_CSW_NAME="ffmpeg_dev"
+PKG_BREW_NAME="ffmpeg"
+PKG_TEST_HEADER="<libavfilter/version.h>"
+PKG_LIBS="-lavfilter"
+
+# Check if FFmpeg is too old
+pkg-config ${PKG_CONFIG_NAME} --max-version=5.99 2>/dev/null
+if [ $? -eq 0 ]; then
+  echo "ERROR: Your version of FFmpeg is too old! Need at least FFmpeg (>= 3.2)" 1>&2
+  if [ "`lsb_release -c 2>/dev/null | grep xenial`" ]; then
+    echo "On Ubuntu Trusty/Xenial use our PPA: " 2>/dev/null
+    echo "  sudo add-apt-repository -y ppa:cran/ffmpeg-3" 2>/dev/null
+    echo "  sudo apt-get update" 2>/dev/null
+    echo "  sudo apt-get dist-upgrade" 2>/dev/null
+  fi
+  exit 1
+fi
+
+# FFMPEG 3 and 4 include libavfilter 6.0
+pkg-config ${PKG_CONFIG_NAME} --atleast-version=6 2>/dev/null
+if [ $? -eq 0 ]; then
+  PKGCONFIG_CFLAGS=`pkg-config --cflags --silence-errors ${PKG_CONFIG_NAME}`
+  PKGCONFIG_LIBS=`pkg-config --libs ${PKG_CONFIG_NAME}`
+fi
+
+# Check for custom locations
+if [ "$INCLUDE_DIR" ] || [ "$LIB_DIR" ]; then
+  echo "Found INCLUDE_DIR and/or LIB_DIR!"
+  PKG_CFLAGS="-I$INCLUDE_DIR $PKG_CFLAGS"
+  PKG_LIBS="-L$LIB_DIR $PKG_LIBS"
+elif [ "$PKGCONFIG_CFLAGS" ] || [ "$PKGCONFIG_LIBS" ]; then
+  echo "Found pkg-config cflags and libs!"
+  PKG_CFLAGS=${PKGCONFIG_CFLAGS}
+  PKG_LIBS=${PKGCONFIG_LIBS}
+elif [ `uname` = "Darwin" ]; then
+  brew --version 2>/dev/null
+  if [ $? -eq 0 ]; then
+    BREWDIR=`brew --prefix`
+    PKG_CFLAGS="-I$BREWDIR/opt/$PKG_BREW_NAME/include"
+    PKG_LIBS="-L$BREWDIR/opt/$PKG_BREW_NAME/lib $PKG_LIBS"
+  else
+    curl -sfL "https://autobrew.github.io/scripts/$PKG_BREW_NAME" > autobrew
+    . ./autobrew
+  fi
+fi
+
+# For debugging
+echo "Using PKG_CFLAGS=$PKG_CFLAGS"
+echo "Using PKG_LIBS=$PKG_LIBS"
+
+# Find compiler
+CXX=`${R_HOME}/bin/R CMD config CXX`
+CXXFLAGS=`${R_HOME}/bin/R CMD config CXXFLAGS`
+CPPFLAGS=`${R_HOME}/bin/R CMD config CPPFLAGS`
+
+# Test for ffmpeg
+echo "#include $PKG_TEST_HEADER" | ${CXX} -E ${CPPFLAGS} ${PKG_CFLAGS} ${CXXFLAGS} -xc++ - >/dev/null 2>configure.log
+if [ $? -ne 0 ]; then
+  echo "-----------------------------[ ANTICONF ]----------------------------------"
+  echo "Configuration failed to find the $PKG_CONFIG_NAME library. Try installing:"
+  echo " * deb: $PKG_DEB_NAME (Debian, Ubuntu 18.04 and up)"
+  echo " * rpm: $PKG_RPM_NAME (Fedora, CentOS, RHEL)"
+  echo " * csw: $PKG_CSW_NAME (Solaris)"
+  echo " * brew: $PKG_BREW_NAME (MacOS)"
+  echo "For Ubuntu Trusty (14.04) and Xenial (16.04) use this PPA:"
+  echo "   sudo add-apt-repository -y ppa:cran/ffmpeg-3"
+  echo "   sudo apt-get update"
+  echo "   sudo apt-get install -y $PKG_DEB_NAME"
+  echo "If $PKG_CONFIG_NAME is already installed, check that 'pkg-config' is in your"
+  echo "PATH and PKG_CONFIG_PATH contains a $PKG_CONFIG_NAME.pc file. If pkg-config"
+  echo "is unavailable you can set INCLUDE_DIR and LIB_DIR manually via:"
+  echo "R CMD INSTALL --configure-vars='INCLUDE_DIR=... LIB_DIR=...'"
+  echo "---------------------------[ ERROR MESSAGE ]--------------------------------"
+  cat configure.log
+  echo "----------------------------------------------------------------------------"
+  exit 1
+fi
+
+# Write to Makevars
+sed -e "s|@cflags@|$PKG_CFLAGS|" -e "s|@libs@|$PKG_LIBS|" src/Makevars.in > src/Makevars
+
+# Success
+exit 0
